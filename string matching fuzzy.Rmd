@@ -1,0 +1,129 @@
+---
+title: "Analisis Fuzzy Matching untuk Menghubungkan Data Penjualan"
+author: "Ferdian Bangkit Wijaya"
+date: "`r format(Sys.Date(), '%d %B %Y')`"
+output:
+  github_document:
+    toc: true
+---
+
+# Latar Belakang
+
+Laporan ini mendemonstrasikan proses pembersihan dan penggabungan data dari tiga sumber yang berbeda menggunakan teknik **Fuzzy Matching**. Skenario yang diangkat adalah menghubungkan data transaksi penjualan yang tidak standar dengan data master pelanggan dan produk yang sudah terstruktur.
+
+**Tujuan:**
+Menghasilkan satu tabel data (dataset) yang bersih, utuh, dan diperkaya dengan ID pelanggan serta ID produk yang valid, sehingga siap untuk dianalisis lebih lanjut.
+
+```{r setup, include=FALSE}
+# Chunk ini untuk persiapan awal, seperti memuat library.
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+
+library(readxl)
+library(dplyr)
+library(fuzzyjoin)
+library(stringdist)
+library(knitr)
+```
+
+## 1. Memuat Data dari Excel
+
+Data mentah bersumber dari sebuah file Excel (`Contoh Data Penjualan Toko.xlsx`) yang terdiri dari tiga sheet terpisah.
+
+```{r load-data}
+# Mendefinisikan path ke file Excel
+file_path <- "C:/Users/user/OneDrive - untirta.ac.id/UNTIRTA/Bahan Ajar/Pengantar Data Sains/25-26/Contoh Data Penjualan Toko.xlsx"
+
+# Membaca setiap sheet menjadi data frame
+df_profil <- read_excel(file_path, sheet = "profil_pelanggan")
+df_transaksi <- read_excel(file_path, sheet = "transaksi_pembelian")
+df_produk <- read_excel(file_path, sheet = "master_produk")
+```
+
+## 2. Eksplorasi Data Awal
+
+Berikut adalah pratinjau singkat dari ketiga tabel yang telah dimuat.
+
+```{r preview-data}
+# Menampilkan 5 baris pertama dari setiap tabel
+kable(head(df_profil), caption = "Tabel Master Profil Pelanggan")
+kable(head(df_transaksi), caption = "Tabel Transaksi Pembelian (Data Mentah)")
+kable(head(df_produk), caption = "Tabel Master Produk")
+```
+
+## 3. Proses Fuzzy Matching
+
+### Tahap 1: Menghubungkan Transaksi dengan Profil Pelanggan
+
+Kita menggunakan validasi ganda: mencocokkan berdasarkan kemiripan **nama** dan divalidasi dengan kemiripan **alamat**.
+
+```{r fuzzy-join-customer}
+# Fuzzy join berdasarkan nama
+df_intermediate <- stringdist_join(
+  df_transaksi, df_profil,
+  by = c("nama_pelanggan" = "nama_lengkap"),
+  mode = "left", method = "jw", max_dist = 0.3, distance_col = "jarak_nama"
+) %>%
+  group_by(id_transaksi) %>%
+  slice_min(order_by = jarak_nama, n = 1) %>%
+  ungroup()
+
+# Hitung jarak alamat
+df_intermediate <- df_intermediate %>%
+  rowwise() %>%
+  mutate(
+    jarak_alamat = ifelse(!is.na(alamat_domisili), 
+                           stringdist(alamat_pengiriman, alamat_domisili, method = "jw"), 
+                           NA)
+  ) %>%
+  ungroup()
+```
+
+#### Analisis Jarak untuk Kalibrasi Threshold
+Tabel di bawah ini menunjukkan skor jarak untuk semua pasangan, yang membantu kita menentukan nilai ambang batas (threshold) yang realistis.
+
+```{r analyze-distances}
+tabel_analisis_jarak <- select(df_intermediate, id_transaksi, nama_pelanggan, nama_lengkap, jarak_nama, jarak_alamat)
+kable(tabel_analisis_jarak, caption = "Analisis Jarak Nama & Alamat (Sebelum Filter)")
+```
+
+Berdasarkan tabel analisis di atas, kita menetapkan threshold berikut.
+
+```{r filter-customer}
+JARAK_NAMA_MAX <- 0.25
+JARAK_ALAMAT_MAX <- 0.4
+df_linked_profil <- df_intermediate %>%
+  filter(jarak_nama <= JARAK_NAMA_MAX & jarak_alamat <= JARAK_ALAMAT_MAX)
+```
+
+### Tahap 2: Menghubungkan dengan Master Produk
+
+Kita lanjutkan dengan mencocokkan `nama_barang` dengan `nama_produk_resmi`.
+
+```{r fuzzy-join-product}
+# Fuzzy join dengan data produk
+df_final <- stringdist_join(
+  df_linked_profil, df_produk,
+  by = c("nama_barang" = "nama_produk_resmi"),
+  mode = "left", method = "jw", max_dist = 0.3, distance_col = "jarak_produk"
+) %>%
+  group_by(id_transaksi) %>%
+  slice_min(order_by = jarak_produk, n = 1) %>%
+  ungroup()
+```
+
+## 4. Hasil Akhir
+
+Berikut adalah tabel final setelah melalui seluruh proses pembersihan dan penggabungan.
+
+```{r final-result}
+# Memilih dan menata ulang kolom untuk hasil akhir
+final_columns <- c(
+  'id_transaksi', 'id_profil', 'nama_pelanggan', 'nama_lengkap',
+  'id_produk', 'nama_barang', 'nama_produk_resmi',
+  'jumlah', 'harga', 'jarak_nama', 'jarak_alamat', 'jarak_produk'
+)
+final_columns_exist <- intersect(final_columns, names(df_final))
+
+# Menampilkan tabel final dengan format yang rapi
+kable(df_final[final_columns_exist], caption = "Tabel Final Hasil Fuzzy Matching")
+```
